@@ -308,6 +308,7 @@ label.check input { accent-color: var(--accent); }
 .form { padding: 16px 18px; display: flex; flex-direction: column; gap: 12px; }
 .form label { justify-content: space-between; gap: 14px; }
 .form input, .form select { width: 330px; }
+.form-title { margin: 6px 0 0; font-size: 13px; color: var(--accent); border-top: 1px solid var(--border); padding-top: 10px; }
 
 /* ---------- Toast ---------- */
 .toast {

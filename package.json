@@ -1,0 +1,8 @@
+{
+  "name": "github_auto_pull",
+  "version": "0.1.0",
+  "description": "github_auto_pull 项目",
+  "main": "index.js",
+  "scripts": {},
+  "dependencies": {}
+}

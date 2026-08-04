@@ -61,24 +61,43 @@ async function loadConfig() {
   $("#badge-gh").textContent = `GitHub ${c.github_token_set ? "✓" : "✗"}`;
   $("#badge-gh").className = "badge " + (c.github_token_set ? "ok" : "warn");
   $("#ver").textContent = "v" + (c.version || "?");
+  $("#cfg-llm-key").value = "";
+  $("#cfg-llm-key").placeholder = c.llm_key_set ? "已配置（" + (c.llm_api_key || "****") + "），留空保持不变" : "未配置，填写新的 Key";
+  $("#cfg-gh-token").value = "";
+  $("#cfg-gh-token").placeholder = c.github_token_set ? "已配置（" + (c.github_token || "****") + "），留空保持不变" : "未配置，填写新的 Token";
   $("#cfg-model").value = c.llm_model || "";
   $("#cfg-base-url").value = c.llm_base_url || "";
   $("#cfg-lang").value = c.readme_lang || "auto";
+  $("#cfg-author-name").value = c.author_name || "";
+  $("#cfg-author-email").value = c.author_email || "";
+  $("#cfg-commit-msg").value = c.commit_message || "";
+  $("#cfg-license").value = c.license || "MIT";
+  $("#cfg-private").checked = !!c.private;
   $("#cfg-verify-ssl").checked = c.verify_ssl === false;
+  $("#cfg-ca-bundle").value = c.ca_bundle || "";
   $("#cfg-proxy").value = c.proxy || "";
 }
 
 async function saveSettings() {
   try {
     await api("POST", "/api/config", {
-      model: $("#cfg-model").value.trim(),
-      base_url: $("#cfg-base-url").value.trim(),
+      llm_api_key: $("#cfg-llm-key").value.trim(),
+      llm_base_url: $("#cfg-base-url").value.trim(),
+      llm_model: $("#cfg-model").value.trim(),
+      github_token: $("#cfg-gh-token").value.trim(),
+      author_name: $("#cfg-author-name").value.trim(),
+      author_email: $("#cfg-author-email").value.trim(),
       readme_lang: $("#cfg-lang").value,
+      commit_message: $("#cfg-commit-msg").value.trim(),
+      license: $("#cfg-license").value.trim(),
+      private: $("#cfg-private").checked,
       verify_ssl: !$("#cfg-verify-ssl").checked,
+      ca_bundle: $("#cfg-ca-bundle").value.trim(),
       proxy: $("#cfg-proxy").value.trim(),
     });
     $("#settings-modal").classList.add("hidden");
-    toast("设置已保存（本次会话生效）", "ok");
+    await loadConfig();
+    toast("设置已保存到 config.json", "ok");
   } catch (e) {
     toast("保存失败: " + e.message, "error");
   }
@@ -248,6 +267,22 @@ async function doGenerate() {
   }
 }
 
+async function doDeps() {
+  if (!state.current) { toast("请先选择项目", "error"); return; }
+  setStatus("正在生成依赖文件…");
+  switchTab("logs");
+  try {
+    const { job_id } = await api("POST", "/api/deps", { path: state.current.path });
+    const result = await runJob(job_id);
+    const created = (result.created || []).length;
+    toast(created ? `已创建 ${created} 个依赖/配置文件` : "无需创建（均已存在或无第三方依赖）", created ? "ok" : "info");
+    setStatus(created ? `已创建: ${result.created.join(", ")}` : "无需创建", created ? "ok" : "");
+  } catch (e) {
+    toast("生成失败: " + e.message, "error");
+    setStatus("生成失败", "err");
+  }
+}
+
 async function refreshPreview() {
   try {
     const data = await api("POST", "/api/preview", { markdown: $("#readme-editor").value });
@@ -343,6 +378,7 @@ $("#btn-settings").addEventListener("click", () => $("#settings-modal").classLis
 $("#btn-close-settings").addEventListener("click", () => $("#settings-modal").classList.add("hidden"));
 $("#btn-settings-save").addEventListener("click", saveSettings);
 $("#btn-generate").addEventListener("click", doGenerate);
+$("#btn-deps").addEventListener("click", doDeps);
 $("#btn-save").addEventListener("click", doSave);
 $("#btn-preview").addEventListener("click", refreshPreview);
 $("#btn-push").addEventListener("click", doPush);

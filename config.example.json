@@ -14,5 +14,6 @@
   "commit_message": "docs: generate README via GitHub Auto",
   "verify_ssl": true,
   "ca_bundle": "",
-  "proxy": ""
+  "proxy": "",
+  "license": "MIT"
 }

@@ -98,6 +98,32 @@ python github_auto.py doctor
 
 输出当前配置（token、模型、代理）、git 代理设置，并实际测试 GitHub API、`git → github.com` 和 LLM 接口的连通性，连接问题一目了然。
 
+### 7. 自动补全依赖文件，形成完整项目
+
+```powershell
+python github_auto.py deps D:\projects\my-app
+```
+
+自动识别项目语言并扫描源码中的第三方依赖，创建缺失的文件：
+
+- **Python** → `requirements.txt`（自动过滤标准库和本地模块，常见别名自动映射，如 `yaml`→`PyYAML`、`cv2`→`opencv-python`）
+- **Node.js** → `package.json`（检测 `require`/`import`，自动找入口文件并生成 start/dev 脚本）
+- **Go** → `go.mod`（检测到 go 工具链时自动运行 `go mod tidy` 补全版本）
+- **Rust** → `Cargo.toml`（检测 `use` 依赖）
+- 所有项目都会补 `.gitignore`（按语言生成）和 `LICENSE`（默认 MIT，作者取配置里的 `author_name`）
+
+已有清单/配置文件不会被覆盖（`--force` 可强制重建），不会改动你的源码。`run` 命令加 `--deps` 可先补依赖再生成 README（README 里就能带上真实依赖）；Web 界面「README」页也有「生成依赖文件」按钮。
+
+### 8. Web 设置页可修改全部配置
+
+Web 界面右上角「设置」里可以修改并**保存到 config.json** 的全部配置：
+
+- LLM：API Key（留空保留原值，已脱敏显示）、Base URL、模型
+- GitHub：Token（同上）、作者名、作者邮箱
+- 常规：README 语言、提交信息、许可证（影响依赖补全生成的 LICENSE）、新仓库默认私有、跳过 SSL 校验、CA 证书路径、代理
+
+保存后立即生效（网络相关配置会重新加载）。密钥只显示前后 4 位，不会完整出现在页面上。
+
 ## 工作原理
 
 ```text
@@ -170,6 +196,9 @@ Web 界面「设置」里也可以直接配置代理（留空=系统代理、`no
 
 **GitHub 上已经有同名仓库？**
 不会再去创建 `xxx-2` 这类新仓库了：同名仓库存在时直接使用现有仓库并推送。现有仓库是空的（比如之前推送失败留下的）会直接推入 `main`；如果远端已有不同的提交历史导致 `main` 被拒绝，会自动改推一个新分支（`auto-日期时间`），不会覆盖你的旧数据。代理连续失败时也会记住状态，后续请求直接走直连，不再每条都报警告。
+
+**仓库的 About（简介）没有内容？**
+推送时工具会自动把仓库的 About 填上：配置了 LLM 时用 **AI 生成一句简介**（根据项目语言、依赖、规模等信息），AI 不可用时回退到 README 标题下的 slogan（`> ...` 那行）→ 包元数据 description → 语言信息的兜底描述。无论是新建仓库还是已存在的仓库都会更新；日志里会显示「已更新仓库 About」。
 
 ## 许可证
 

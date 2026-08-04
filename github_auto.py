@@ -24,6 +24,7 @@ import html
 import json
 import os
 import re
+import shutil
 import ssl
 import string
 import subprocess
@@ -157,10 +158,14 @@ DEFAULT_CONFIG = {
     "verify_ssl": True,
     "ca_bundle": "",
     "proxy": "",
+    "license": "MIT",
 }
+
+_CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 
 
 def load_config(explicit: str | None = None) -> dict:
+    global _CONFIG_PATH
     cfg = deepcopy(DEFAULT_CONFIG)
     candidates: list[Path] = []
     if explicit:
@@ -172,6 +177,7 @@ def load_config(explicit: str | None = None) -> dict:
 
     for cand in candidates:
         if cand.exists():
+            _CONFIG_PATH = cand
             try:
                 data = json.loads(cand.read_text(encoding="utf-8-sig"))
                 if isinstance(data.get("llm"), dict):
@@ -187,10 +193,14 @@ def load_config(explicit: str | None = None) -> dict:
                     cfg["ca_bundle"] = data["ca_bundle"]
                 if isinstance(data.get("proxy"), str):
                     cfg["proxy"] = data["proxy"]
+                if isinstance(data.get("license"), str):
+                    cfg["license"] = data["license"]
                 log(f"已加载配置文件: {cand}")
             except Exception as exc:
                 raise ToolError(f"配置文件 {cand} 解析失败: {exc}") from exc
             break
+    else:
+        _CONFIG_PATH = Path(explicit) if explicit else Path(__file__).resolve().parent / "config.json"
 
     # 环境变量优先
     cfg["llm"]["api_key"] = (
@@ -217,6 +227,42 @@ def load_config(explicit: str | None = None) -> dict:
     if os.environ.get("PROXY") is not None:
         cfg["proxy"] = os.environ["PROXY"]
     return cfg
+
+
+def _mask_secret(value: str) -> str:
+    if not value:
+        return ""
+    if len(value) <= 8:
+        return "****"
+    return f"{value[:4]}****{value[-4:]}"
+
+
+def save_config(cfg: dict, path: str | None = None) -> None:
+    """把运行时配置写回 config.json（保留文件中已有的未知字段）。"""
+    target = Path(path) if path else _CONFIG_PATH
+    data: dict = {}
+    if target.exists():
+        try:
+            data = json.loads(target.read_text(encoding="utf-8-sig"))
+        except Exception:
+            data = {}
+    data.setdefault("llm", {})
+    data.setdefault("github", {})
+    data["llm"]["api_key"] = cfg["llm"].get("api_key", "")
+    data["llm"]["base_url"] = cfg["llm"].get("base_url", "")
+    data["llm"]["model"] = cfg["llm"].get("model", "")
+    data["github"]["token"] = cfg["github"].get("token", "")
+    data["github"]["author_name"] = cfg["github"].get("author_name", "")
+    data["github"]["author_email"] = cfg["github"].get("author_email", "")
+    data["readme_lang"] = cfg.get("readme_lang", "auto")
+    data["private"] = bool(cfg.get("private", False))
+    data["commit_message"] = cfg.get("commit_message", DEFAULT_CONFIG["commit_message"])
+    data["verify_ssl"] = bool(cfg.get("verify_ssl", True))
+    data["ca_bundle"] = cfg.get("ca_bundle", "")
+    data["proxy"] = cfg.get("proxy", "")
+    data["license"] = cfg.get("license", "MIT")
+    target.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    log(f"配置已保存到 {target}", "OK")
 
 
 # --------------------------------------------------------------------------
@@ -724,6 +770,36 @@ def gh_create_repo(owner: str, name: str, description: str, private: bool, token
     return data
 
 
+def parse_github_url(url: str) -> tuple[str, str] | None:
+    """从远程地址解析 (owner, repo)，支持 https 与 ssh 两种格式。"""
+    m = re.match(
+        r"(?:https?://|ssh://|git@)(?:www\.)?github\.com[:/]([^/]+)/([^/.]+)",
+        url,
+    )
+    if m:
+        return m.group(1), m.group(2)
+    return None
+
+
+def repo_description(root: Path, analysis: dict) -> str:
+    """生成仓库 About 描述：优先取 README 的 slogan，其次元数据描述。"""
+    readme = root / "README.md"
+    if readme.exists():
+        lines = _read_text(readme).splitlines()
+        for idx, line in enumerate(lines):
+            if line.startswith("# "):
+                for nxt in lines[idx + 1 : idx + 5]:
+                    s = nxt.strip()
+                    if s.startswith(">"):
+                        return s.lstrip(">").strip()[:300]
+                break
+    md = analysis.get("metadata") or {}
+    if md.get("description"):
+        return str(md["description"]).strip()[:300]
+    langs = ", ".join(list(analysis.get("languages", {}))[:3]) or "多种技术"
+    return f"{analysis['name']} - 使用 {langs} 开发的项目"[:300]
+
+
 # --------------------------------------------------------------------------
 # 项目分析
 # --------------------------------------------------------------------------
@@ -997,6 +1073,353 @@ def analyze_project(root: Path) -> dict:
 
 
 # --------------------------------------------------------------------------
+# 依赖文件生成（自动补全项目）
+# --------------------------------------------------------------------------
+
+PY_STDLIB = set(getattr(sys, "stdlib_module_names", ())) | {
+    "__future__", "typing", "dataclasses", "enum", "abc", "collections",
+    "functools", "itertools", "operator", "pathlib", "re", "os", "sys",
+    "json", "csv", "sqlite3", "datetime", "time", "math", "random",
+    "string", "subprocess", "threading", "multiprocessing", "logging",
+    "argparse", "asyncio", "io", "tempfile", "shutil", "glob", "hashlib",
+    "hmac", "base64", "uuid", "copy", "warnings", "traceback", "weakref",
+    "contextlib", "types", "unicodedata", "bisect", "heapq", "queue",
+    "socket", "email", "http", "urllib", "xml", "html", "webbrowser",
+    "configparser", "statistics", "decimal", "fractions", "getpass",
+    "platform", "signal", "struct", "zipfile", "tarfile", "gzip",
+    "zlib", "pickle", "shelve", "dbm", "select", "selectors", "ssl",
+    "tkinter", "curses", "turtle", "unittest", "doctest", "pdb",
+    "venv", "zoneinfo", "importlib", "pkgutil", "runpy", "site",
+    "ctypes", "cProfile", "profile", "timeit", "wave", "colorsys",
+    "gettext", "locale", "codecs", "dis", "inspect", "linecache",
+    "marshal", "optparse", "token", "tokenize", "keyword", "ast",
+    "compileall", "difflib", "fnmatch", "ftplib", "imaplib", "nntplib",
+    "poplib", "smtplib", "telnetlib", "xmlrpc", "wsgiref", "cgi",
+    "cgitb", "mailbox", "mimetypes", "quopri", "uu", "xdrlib",
+}
+
+PY_PKG_MAP = {
+    "yaml": "PyYAML", "PIL": "Pillow", "cv2": "opencv-python",
+    "sklearn": "scikit-learn", "bs4": "beautifulsoup4",
+    "dotenv": "python-dotenv", "dateutil": "python-dateutil",
+    "cryptography": "cryptography", "matplotlib": "matplotlib",
+    "numpy": "numpy", "pandas": "pandas", "flask": "Flask",
+    "django": "Django", "requests": "requests", "fastapi": "fastapi",
+    "pydantic": "pydantic", "tqdm": "tqdm", "click": "click",
+    "typer": "typer", "aiohttp": "aiohttp", "sqlalchemy": "SQLAlchemy",
+    "redis": "redis", "pymongo": "pymongo", "psycopg2": "psycopg2-binary",
+    "selenium": "selenium", "httpx": "httpx", "jinja2": "Jinja2",
+    "gunicorn": "gunicorn", "uvicorn": "uvicorn", "torch": "torch",
+    "tensorflow": "tensorflow", "keras": "keras", "scipy": "scipy",
+    "pytest": "pytest", "celery": "celery", "sentry_sdk": "sentry-sdk",
+    "bson": "pymongo", "PIL.Image": "Pillow",
+}
+
+NODE_BUILTINS = {
+    "fs", "path", "http", "https", "os", "crypto", "stream", "util",
+    "events", "child_process", "url", "querystring", "zlib", "buffer",
+    "net", "tls", "dgram", "cluster", "dns", "readline", "repl", "timers",
+    "tty", "v8", "vm", "wasi", "worker_threads", "assert", "async_hooks",
+    "constants", "domain", "module", "perf_hooks", "process", "punycode",
+    "string_decoder", "sys", "trace_events", "inspector", "node:test",
+}
+
+
+def _iter_source_files(root: Path, exts: set[str]):
+    for f in root.rglob("*"):
+        if not f.is_file() or f.suffix.lower() not in exts:
+            continue
+        rel = f.relative_to(root)
+        if any(part in SKIP_DIRS or part.startswith(".") for part in rel.parts):
+            continue
+        yield f
+
+
+def _local_names(root: Path, exts: set[str]) -> set[str]:
+    names: set[str] = set()
+    for e in root.iterdir():
+        if e.is_file() and e.suffix.lower() in exts:
+            names.add(e.stem)
+        elif e.is_dir() and not e.name.startswith(".") and e.name not in SKIP_DIRS:
+            names.add(e.name)
+    # 项目内任意位置的目录/模块都视为本地，避免嵌套子包被误判为第三方依赖
+    for f in root.rglob("*"):
+        rel = f.relative_to(root)
+        if any(part in SKIP_DIRS or part.startswith(".") for part in rel.parts):
+            continue
+        if f.is_dir():
+            names.add(f.name)
+        elif f.suffix.lower() in exts:
+            names.add(f.stem)
+    return names
+
+
+def detect_python_deps(root: Path) -> list[str]:
+    local = _local_names(root, {".py"})
+    imports: set[str] = set()
+    for f in _iter_source_files(root, {".py"}):
+        content = _read_text(f)
+        imports.update(
+            re.findall(r"^\s*(?:import|from)\s+([a-zA-Z_][a-zA-Z0-9_]*)", content, re.M)
+        )
+    pkgs: set[str] = set()
+    for name in imports:
+        if name in local or name in PY_STDLIB:
+            continue
+        pkgs.add(PY_PKG_MAP.get(name, name))
+    return sorted(pkgs)
+
+
+def detect_node_deps(root: Path) -> list[str]:
+    exts = {".js", ".ts", ".jsx", ".tsx", ".mjs", ".cjs"}
+    local = _local_names(root, exts)
+    mods: set[str] = set()
+    for f in _iter_source_files(root, exts):
+        content = _read_text(f)
+        mods.update(re.findall(r"require\(['\"]([^'\"]+)['\"]\)", content))
+        mods.update(re.findall(r"from\s+['\"]([^'\"]+)['\"]", content))
+        mods.update(re.findall(r"^\s*import\s+['\"]([^'\"]+)['\"]", content, re.M))
+    deps: set[str] = set()
+    for m in mods:
+        if m.startswith("./") or m.startswith("../") or m.startswith("."):
+            continue
+        if m.startswith("@"):
+            parts = m.split("/")
+            name = "/".join(parts[:2]) if len(parts) >= 2 else parts[0]
+        else:
+            name = m.split("/")[0]
+        if name in NODE_BUILTINS or name in local:
+            continue
+        deps.add(name)
+    return sorted(deps)
+
+
+def _is_external_go(path: str) -> bool:
+    return "." in path.split("/")[0]
+
+
+def detect_go_deps(root: Path) -> list[str]:
+    deps: set[str] = set()
+    for f in _iter_source_files(root, {".go"}):
+        content = _read_text(f)
+        in_block = False
+        for line in content.splitlines():
+            s = line.strip()
+            if s.startswith("import"):
+                rest = s[6:].strip()
+                if rest.startswith("("):
+                    in_block = True
+                elif rest.startswith('"'):
+                    path = rest.strip('"')
+                    if _is_external_go(path):
+                        deps.add(path)
+            elif in_block:
+                if s.startswith(")"):
+                    in_block = False
+                elif s.startswith('"'):
+                    path = s.strip('"')
+                    if _is_external_go(path):
+                        deps.add(path)
+    return sorted(deps)
+
+
+def detect_rust_deps(root: Path) -> list[str]:
+    local = _local_names(root, {".rs"})
+    rust_std = {"std", "core", "alloc", "proc_macro", "test", "self", "super", "crate"}
+    crates: set[str] = set()
+    for f in _iter_source_files(root, {".rs"}):
+        content = _read_text(f)
+        for m in re.finditer(r"^\s*use\s+([a-zA-Z0-9_]+)", content, re.M):
+            crate = m.group(1)
+            if crate not in rust_std and crate not in local:
+                crates.add(crate)
+    return sorted(crates)
+
+
+def _detect_node_entry(root: Path) -> str | None:
+    for name in (
+        "index.js", "index.ts", "main.js", "app.js", "server.js",
+        "src/index.js", "src/index.ts", "src/main.js", "src/app.js",
+        "src/server.js",
+    ):
+        if (root / name).exists():
+            return name
+    return None
+
+
+def build_gitignore(langs: list[str]) -> str:
+    sections: list[str] = []
+    if "Python" in langs:
+        sections.append("# Python\n__pycache__/\n*.py[cod]\n*.egg-info/\n.venv/\nvenv/\nenv/\n.env\n.pytest_cache/\n.mypy_cache/\n.ruff_cache/")
+    if any(l in langs for l in ("JavaScript", "TypeScript", "Vue", "Svelte")):
+        sections.append("# Node.js\nnode_modules/\ndist/\nbuild/\n.next/\n*.log\nnpm-debug.log*\n.env")
+    if "Go" in langs:
+        sections.append("# Go\nbin/\n*.exe\n*.test\ncoverage.out")
+    if "Rust" in langs:
+        sections.append("# Rust\ntarget/")
+    sections.append("# 通用\n.DS_Store\nThumbs.db\n.idea/\n.vscode/\n*.swp")
+    return "\n\n".join(sections) + "\n"
+
+
+MIT_LICENSE = """MIT License
+
+Copyright (c) {year} {author}
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+"""
+
+
+def generate_dependency_files(
+    root: Path,
+    analysis: dict | None = None,
+    force: bool = False,
+    dry_run: bool = False,
+    cfg: dict | None = None,
+) -> list[str]:
+    """自动补全缺失的依赖/配置文件，返回创建的文件名列表。"""
+    root = Path(root)
+    if analysis is None:
+        analysis = analyze_project(root)
+    cfg = cfg or {}
+    langs = list(analysis.get("languages", {}).keys())
+    created: list[str] = []
+
+    def _write(name: str, content: str) -> None:
+        if dry_run:
+            log(f"将创建 {name}")
+            created.append(name)
+            return
+        (root / name).write_text(content, encoding="utf-8")
+        created.append(name)
+        log(f"已创建 {name}", "OK")
+
+    # Python
+    if "Python" in langs:
+        has_manifest = any(
+            (root / f).exists()
+            for f in ("requirements.txt", "pyproject.toml", "setup.py", "Pipfile")
+        )
+        if has_manifest and not force:
+            log("已存在 Python 依赖清单，跳过 requirements.txt")
+        else:
+            deps = detect_python_deps(root)
+            if deps:
+                _write("requirements.txt", "\n".join(deps) + "\n")
+            else:
+                log("未检测到第三方 Python 依赖，跳过 requirements.txt")
+
+    # Node.js
+    if any(l in langs for l in ("JavaScript", "TypeScript", "Vue", "Svelte")):
+        pkg_json = root / "package.json"
+        if pkg_json.exists() and not force:
+            log("已存在 package.json，跳过")
+        else:
+            deps = detect_node_deps(root)
+            entry = _detect_node_entry(root)
+            scripts = {}
+            if entry:
+                scripts = {"start": f"node {entry}", "dev": f"node {entry}"}
+            md = analysis.get("metadata") or {}
+            pkg = {
+                "name": sanitize_repo_name(root.name),
+                "version": "0.1.0",
+                "description": md.get("description") or f"{root.name} 项目",
+                "main": entry or "index.js",
+                "scripts": scripts,
+                "dependencies": {d: "*" for d in deps},
+            }
+            _write(
+                "package.json",
+                json.dumps(pkg, ensure_ascii=False, indent=2) + "\n",
+            )
+
+    # Go
+    if "Go" in langs:
+        go_mod = root / "go.mod"
+        if go_mod.exists() and not force:
+            log("已存在 go.mod，跳过")
+        else:
+            deps = detect_go_deps(root)
+            content = f"module {sanitize_repo_name(root.name)}\n\ngo 1.21\n"
+            if deps:
+                content += "\n// 运行 go mod tidy 拉取依赖\n"
+            _write("go.mod", content)
+            if not dry_run and deps and shutil.which("go"):
+                log("检测到 go 工具链，运行 go mod tidy 补全依赖版本…")
+                result = subprocess.run(
+                    ["go", "mod", "tidy"],
+                    cwd=str(root),
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=180,
+                )
+                if result.returncode == 0:
+                    log("go mod tidy 完成", "OK")
+                else:
+                    log(f"go mod tidy 失败（{result.stderr.strip()[:200]}），go.mod 需手动补全", "WARN")
+
+    # Rust
+    if "Rust" in langs:
+        cargo = root / "Cargo.toml"
+        if cargo.exists() and not force:
+            log("已存在 Cargo.toml，跳过")
+        else:
+            deps = detect_rust_deps(root)
+            lines = [
+                "[package]",
+                f'name = "{sanitize_repo_name(root.name)}"',
+                'version = "0.1.0"',
+                'edition = "2021"',
+                "",
+                "[dependencies]",
+            ]
+            lines += [f'{d} = "*"' for d in deps]
+            _write("Cargo.toml", "\n".join(lines) + "\n")
+
+    # .gitignore
+    gitignore = root / ".gitignore"
+    if gitignore.exists() and not force:
+        log("已存在 .gitignore，跳过")
+    else:
+        _write(".gitignore", build_gitignore(langs))
+
+    # LICENSE
+    if not detect_license(root):
+        license_name = str(cfg.get("license", "MIT") or "MIT").strip()
+        author = cfg.get("github", {}).get("author_name") or "GitHub Auto"
+        if license_name.upper() == "MIT":
+            content = MIT_LICENSE.format(year=time.strftime("%Y"), author=author)
+        else:
+            content = (
+                f"{license_name} License\n\n"
+                f"Copyright (c) {time.strftime('%Y')} {author}\n"
+            )
+        _write("LICENSE", content)
+    else:
+        log("已存在 LICENSE，跳过")
+
+    return created
+
+
+# --------------------------------------------------------------------------
 # README 生成
 # --------------------------------------------------------------------------
 
@@ -1126,31 +1549,18 @@ def fallback_readme(analysis: dict, lang: str) -> str:
     return "\n".join(body)
 
 
-def call_llm(analysis: dict, lang: str, cfg: dict) -> str:
+def llm_chat(
+    system: str,
+    user: str,
+    cfg: dict,
+    max_tokens: int = 4000,
+    temperature: float = 0.4,
+) -> str:
     api_key = cfg["llm"]["api_key"]
     base_url = cfg["llm"]["base_url"].rstrip("/")
     model = cfg["llm"]["model"]
     if not api_key:
         raise ToolError("未配置 LLM API Key（OPENAI_API_KEY / LLM_API_KEY）")
-
-    lang_label = "简体中文" if lang == "zh" else "English"
-    system = (
-        "You are an expert open-source developer and technical writer. "
-        "You write polished, accurate GitHub README files that attract users and contributors. "
-        "You never invent commands, dependencies, features, or metrics that are not present "
-        "in the project analysis. When information is missing, use honest placeholders."
-    )
-    user = (
-        f"请为下面这个项目撰写一份完整、精美、可直接用于 GitHub 的 README.md。\n\n"
-        f"输出语言: {lang_label}\n\n"
-        f"要求:\n"
-        f"1. 结构: 标题 + 一句 slogan；项目简介；功能特性；技术栈（用 shields.io 徽章）；"
-        f"快速开始（安装/运行）；项目结构；截图占位；贡献指南；许可证。\n"
-        f"2. 只使用分析数据中出现的信息；不确定的命令用 <your-command> 占位，不要编造。\n"
-        f"3. Markdown 格式规范，善用表格和代码块，emoji 适量点缀。\n"
-        f"4. 只输出 README 的 markdown 正文，不要任何解释，不要用代码围栏包裹整个文档。\n\n"
-        f"项目分析数据(JSON):\n{json.dumps(analysis, ensure_ascii=False, indent=2)}"
-    )
 
     payload = {
         "model": model,
@@ -1158,8 +1568,8 @@ def call_llm(analysis: dict, lang: str, cfg: dict) -> str:
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
-        "temperature": 0.4,
-        "max_tokens": 4000,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
     }
     req = request.Request(
         f"{base_url}/chat/completions",
@@ -1205,6 +1615,56 @@ def call_llm(analysis: dict, lang: str, cfg: dict) -> str:
             last_exc = exc
             log(f"LLM 调用失败，正在重试: {exc}", "WARN")
     raise ToolError(f"LLM 调用失败: {last_exc}")
+
+
+def call_llm(analysis: dict, lang: str, cfg: dict) -> str:
+    lang_label = "简体中文" if lang == "zh" else "English"
+    system = (
+        "You are an expert open-source developer and technical writer. "
+        "You write polished, accurate GitHub README files that attract users and contributors. "
+        "You never invent commands, dependencies, features, or metrics that are not present "
+        "in the project analysis. When information is missing, use honest placeholders."
+    )
+    user = (
+        f"请为下面这个项目撰写一份完整、精美、可直接用于 GitHub 的 README.md。\n\n"
+        f"输出语言: {lang_label}\n\n"
+        f"要求:\n"
+        f"1. 结构: 标题 + 一句 slogan；项目简介；功能特性；技术栈（用 shields.io 徽章）；"
+        f"快速开始（安装/运行）；项目结构；截图占位；贡献指南；许可证。\n"
+        f"2. 只使用分析数据中出现的信息；不确定的命令用 <your-command> 占位，不要编造。\n"
+        f"3. Markdown 格式规范，善用表格和代码块，emoji 适量点缀。\n"
+        f"4. 只输出 README 的 markdown 正文，不要任何解释，不要用代码围栏包裹整个文档。\n\n"
+        f"项目分析数据(JSON):\n{json.dumps(analysis, ensure_ascii=False, indent=2)}"
+    )
+    return llm_chat(system, user, cfg)
+
+
+def _ai_repo_about(analysis: dict, cfg: dict) -> str | None:
+    """用 AI 生成一句仓库 About 简介；失败返回 None 由调用方回退。"""
+    try:
+        lang = resolve_lang(analysis, cfg.get("readme_lang", "auto"))
+        lang_label = "简体中文" if lang == "zh" else "English"
+        compact = {
+            "name": analysis["name"],
+            "languages": list(analysis.get("languages", {})),
+            "metadata": analysis.get("metadata") or {},
+            "run_hint": analysis.get("run_hint") or [],
+            "total_files": analysis.get("total_files"),
+            "total_lines": analysis.get("total_lines"),
+        }
+        system = "You write concise, attractive GitHub repository descriptions."
+        user = (
+            f"根据以下项目分析，用{lang_label}为这个 GitHub 仓库写一句简介（About）。"
+            "要求：一句话，不超过 100 字，准确概括项目用途和亮点，"
+            "不要标题、不要引号、不要任何 markdown 符号。\n\n"
+            f"分析数据:\n{json.dumps(compact, ensure_ascii=False, indent=2)}"
+        )
+        text = llm_chat(system, user, cfg, max_tokens=200, temperature=0.6)
+        text = text.strip().strip('"').strip("'").strip()
+        return text[:300] or None
+    except Exception as exc:
+        log(f"AI 生成 About 失败（{exc}），回退到 README slogan", "WARN")
+        return None
 
 
 def generate_readme(analysis: dict, cfg: dict, no_ai: bool = False) -> tuple[str, str]:
@@ -1276,14 +1736,11 @@ def ensure_remote(root: Path, analysis: dict, cfg: dict, private: bool, dry_run:
     if r.returncode == 0 and r.stdout.strip():
         url = r.stdout.strip()
         log(f"已存在远程仓库: {url}")
+        _update_repo_about(url, root, analysis, cfg, dry_run)
         return url
 
     name = sanitize_repo_name(root.name)
-    md = analysis.get("metadata") or {}
-    description = (
-        md.get("description")
-        or f"{name} - auto-generated by GitHub Auto"
-    )
+    description = repo_description(root, analysis)
     if dry_run:
         log(f"将创建 GitHub 仓库: {name} (private={private}) 并添加为 origin")
         return f"https://github.com/<owner>/{name}.git"
@@ -1304,7 +1761,32 @@ def ensure_remote(root: Path, analysis: dict, cfg: dict, private: bool, dry_run:
         url = repo["clone_url"]
         log(f"已创建远程仓库: {repo['html_url']}", "OK")
     run_git(root, ["remote", "add", "origin", url])
+    _update_repo_about(url, root, analysis, cfg, dry_run)
     return url
+
+
+def _update_repo_about(url: str, root: Path, analysis: dict, cfg: dict, dry_run: bool) -> None:
+    """通过 GitHub API 更新仓库 About（描述），不影响推送结果。"""
+    parsed = parse_github_url(url)
+    token = cfg["github"]["token"]
+    if not parsed or not token or dry_run:
+        return
+    owner, repo = parsed
+    desc = _ai_repo_about(analysis, cfg) if cfg["llm"]["api_key"] else None
+    if not desc:
+        desc = repo_description(root, analysis)
+    if not desc:
+        return
+    try:
+        gh_api(
+            f"https://api.github.com/repos/{owner}/{repo}",
+            token,
+            method="PATCH",
+            payload={"description": desc[:350]},
+        )
+        log(f"已更新仓库 About: {desc[:60]}{'…' if len(desc) > 60 else ''}", "OK")
+    except Exception as exc:
+        log(f"更新仓库 About 失败（不影响推送）: {exc}", "WARN")
 
 
 def process_push(root: Path, cfg: dict, args: argparse.Namespace) -> None:
@@ -1367,6 +1849,10 @@ def process_run(root: Path, cfg: dict, args: argparse.Namespace) -> None:
         log(f"\n========== 处理项目: {project.name} ==========")
         try:
             analysis = analyze_project(project)
+            if getattr(args, "deps", False):
+                log("生成缺失的依赖文件…")
+                generate_dependency_files(project, analysis, dry_run=False, cfg=cfg)
+                analysis = analyze_project(project)  # 重新分析以包含新清单
             content, _ = generate_readme(analysis, cfg, no_ai=args.no_ai)
             status = write_readme(project, content, args.force, None, args.dry_run)
             if not args.skip_push and status != "skip":
@@ -1765,6 +2251,21 @@ def _make_job_push(cfg: dict, body: dict):
     return fn
 
 
+def _make_job_deps(cfg: dict, body: dict):
+    def fn(log_fn):
+        path = Path(str(body.get("path") or ""))
+        log_fn(f"开始分析项目: {path}")
+        analysis = analyze_project(path)
+        created = generate_dependency_files(path, analysis, dry_run=False, cfg=cfg)
+        if not created:
+            log_fn("没有需要创建的依赖文件（均已存在或无第三方依赖）", "WARN")
+        else:
+            log_fn(f"已创建: {', '.join(created)}", "OK")
+        return {"status": "done", "created": created}
+
+    return fn
+
+
 class WebHandler(BaseHTTPRequestHandler):
     server_version = "GitHubAutoWeb/1.0"
     CFG: dict = {}
@@ -1821,13 +2322,20 @@ class WebHandler(BaseHTTPRequestHandler):
                 {
                     "version": VERSION,
                     "llm_key_set": bool(cfg["llm"]["api_key"]),
+                    "llm_api_key": _mask_secret(cfg["llm"]["api_key"]),
                     "llm_base_url": cfg["llm"]["base_url"],
                     "llm_model": cfg["llm"]["model"],
                     "github_token_set": bool(cfg["github"]["token"]),
+                    "github_token": _mask_secret(cfg["github"]["token"]),
                     "author_name": cfg["github"].get("author_name", ""),
+                    "author_email": cfg["github"].get("author_email", ""),
                     "readme_lang": cfg.get("readme_lang", "auto"),
+                    "private": bool(cfg.get("private", False)),
+                    "commit_message": cfg.get("commit_message", DEFAULT_CONFIG["commit_message"]),
                     "verify_ssl": bool(cfg.get("verify_ssl", True)),
+                    "ca_bundle": cfg.get("ca_bundle", ""),
                     "proxy": str(cfg.get("proxy", "") or ""),
+                    "license": cfg.get("license", "MIT"),
                 }
             )
             return
@@ -1886,6 +2394,10 @@ class WebHandler(BaseHTTPRequestHandler):
             job_id = self.MANAGER.start("push", _make_job_push(cfg, body))
             self._json({"job_id": job_id})
             return
+        if path == "/api/deps":
+            job_id = self.MANAGER.start("deps", _make_job_deps(cfg, body))
+            self._json({"job_id": job_id})
+            return
         if path == "/api/preview":
             self._json({"html": render_markdown(str(body.get("markdown") or ""))})
             return
@@ -1899,18 +2411,34 @@ class WebHandler(BaseHTTPRequestHandler):
             self._json({"ok": True, "path": str(target)})
             return
         if path == "/api/config":
-            if str(body.get("model") or "").strip():
-                cfg["llm"]["model"] = str(body["model"]).strip()
-            if str(body.get("base_url") or "").strip():
-                cfg["llm"]["base_url"] = str(body["base_url"]).strip()
+            if str(body.get("llm_api_key") or "").strip():
+                cfg["llm"]["api_key"] = str(body["llm_api_key"]).strip()
+            if str(body.get("llm_model") or "").strip():
+                cfg["llm"]["model"] = str(body["llm_model"]).strip()
+            if str(body.get("llm_base_url") or "").strip():
+                cfg["llm"]["base_url"] = str(body["llm_base_url"]).strip()
+            if str(body.get("github_token") or "").strip():
+                cfg["github"]["token"] = str(body["github_token"]).strip()
+            if isinstance(body.get("author_name"), str):
+                cfg["github"]["author_name"] = body["author_name"].strip()
+            if isinstance(body.get("author_email"), str):
+                cfg["github"]["author_email"] = body["author_email"].strip()
             if body.get("readme_lang") in ("auto", "zh", "en"):
                 cfg["readme_lang"] = body["readme_lang"]
+            if isinstance(body.get("private"), bool):
+                cfg["private"] = body["private"]
+            if str(body.get("commit_message") or "").strip():
+                cfg["commit_message"] = str(body["commit_message"]).strip()
             if isinstance(body.get("verify_ssl"), bool):
                 cfg["verify_ssl"] = body["verify_ssl"]
-                configure_ssl(cfg)
+            if isinstance(body.get("ca_bundle"), str):
+                cfg["ca_bundle"] = body["ca_bundle"].strip()
             if isinstance(body.get("proxy"), str):
                 cfg["proxy"] = body["proxy"].strip()
-                configure_ssl(cfg)
+            if str(body.get("license") or "").strip():
+                cfg["license"] = str(body["license"]).strip()
+            configure_ssl(cfg)
+            save_config(cfg)
             self._json({"ok": True})
             return
         raise ToolError(f"未知接口: {path}")
@@ -1989,6 +2517,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--private", action="store_true", help="创建私有仓库")
     p_run.add_argument("--skip-push", action="store_true", help="只生成 README，不推送")
     p_run.add_argument("--no-ai", action="store_true", help="跳过 AI，使用内置模板")
+    p_run.add_argument("--deps", action="store_true", help="先自动补全依赖文件，再生成 README")
     p_run.add_argument("--dry-run", action="store_true", help="只打印将要执行的操作，不写文件、不调用 API、不推送")
 
     p_push = sub.add_parser("push", help="将项目提交并推送到 GitHub（无远程时自动创建仓库）")
@@ -2002,6 +2531,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_web.add_argument("--no-browser", action="store_true", help="不自动打开浏览器")
 
     p_doctor = sub.add_parser("doctor", help="诊断网络/代理/配置连通性")
+
+    p_deps = sub.add_parser("deps", help="自动创建缺失的项目依赖文件（requirements.txt / package.json / go.mod / Cargo.toml / .gitignore / LICENSE）")
+    p_deps.add_argument("path", help="项目路径")
+    p_deps.add_argument("--force", action="store_true", help="覆盖已存在的清单/配置文件（不覆盖源码）")
+    p_deps.add_argument("--dry-run", action="store_true", help="只预览将要创建的文件")
 
     return parser
 
@@ -2025,6 +2559,12 @@ def main() -> int:
         serve_web(cfg, args)
     elif args.command == "doctor":
         cmd_doctor(cfg)
+    elif args.command == "deps":
+        root = Path(args.path)
+        if not root.exists() or not root.is_dir():
+            raise ToolError(f"路径不存在或不是文件夹: {root}")
+        analysis = analyze_project(root)
+        generate_dependency_files(root, analysis, force=args.force, dry_run=args.dry_run, cfg=cfg)
     return 0
 
 

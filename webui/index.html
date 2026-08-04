@@ -92,6 +92,7 @@
             </label>
             <label class="check"><input type="checkbox" id="readme-noai"> 使用模板（不用 AI）</label>
             <label class="check"><input type="checkbox" id="readme-force"> 强制覆盖已有 README</label>
+            <button id="btn-deps" class="ghost" title="自动识别语言并补全缺失的依赖文件（requirements.txt / package.json / go.mod / Cargo.toml / .gitignore / LICENSE）">生成依赖文件</button>
             <button id="btn-generate" class="primary">生成 README</button>
             <button id="btn-save" class="ghost">保存修改</button>
             <button id="btn-preview" class="ghost">刷新预览</button>
@@ -154,8 +155,15 @@
       <button id="btn-close-settings" class="ghost">✕</button>
     </div>
     <div class="form">
-      <label>模型 <input id="cfg-model" spellcheck="false"></label>
+      <h3 class="form-title">LLM（AI）</h3>
+      <label>API Key <input id="cfg-llm-key" type="password" spellcheck="false"></label>
       <label>API Base URL <input id="cfg-base-url" spellcheck="false"></label>
+      <label>模型 <input id="cfg-model" spellcheck="false"></label>
+      <h3 class="form-title">GitHub</h3>
+      <label>Token <input id="cfg-gh-token" type="password" spellcheck="false"></label>
+      <label>作者名 <input id="cfg-author-name" spellcheck="false"></label>
+      <label>作者邮箱 <input id="cfg-author-email" spellcheck="false"></label>
+      <h3 class="form-title">常规</h3>
       <label>README 语言
         <select id="cfg-lang">
           <option value="auto">自动</option>
@@ -163,9 +171,13 @@
           <option value="en">English</option>
         </select>
       </label>
+      <label>提交信息 <input id="cfg-commit-msg" spellcheck="false"></label>
+      <label>许可证 <input id="cfg-license" placeholder="MIT" spellcheck="false"></label>
+      <label class="check"><input type="checkbox" id="cfg-private"> 新仓库默认私有</label>
       <label class="check"><input type="checkbox" id="cfg-verify-ssl"> 跳过 SSL 证书校验（代理/公司网络报证书错误时勾选）</label>
+      <label>CA 证书路径 <input id="cfg-ca-bundle" placeholder="留空；或用公司 CA 的 .pem 路径" spellcheck="false"></label>
       <label>代理 <input id="cfg-proxy" placeholder="留空=系统代理；none=直连；或 http://127.0.0.1:7890" spellcheck="false"></label>
-      <p class="muted">API Key 请通过环境变量 OPENAI_API_KEY / GITHUB_TOKEN 或 config.json 配置，前端不会接触密钥。</p>
+      <p class="muted">保存会直接写入 config.json 并立即生效；API Key / Token 留空表示保留原值（当前值已脱敏显示）。</p>
     </div>
     <div class="modal-foot">
       <button id="btn-settings-save" class="primary">保存</button>

@@ -696,47 +696,54 @@ def push_to_remote(
 # --------------------------------------------------------------------------
 
 def gh_api(url: str, token: str, method: str = "GET", payload: dict | None = None):
-    body = None
-    headers = {
-        "Authorization": f"token {token}",
-        "Accept": "application/vnd.github+json",
-        "User-Agent": "GitHub-Auto",
-    }
-    if payload is not None:
-        body = json.dumps(payload).encode("utf-8")
-        headers["Content-Type"] = "application/json"
-    req = request.Request(url, data=body, headers=headers, method=method)
-    try:
-        with open_url(req, timeout=30) as resp:
-            raw = resp.read().decode("utf-8")
-            return json.loads(raw) if raw else {}
-    except error.HTTPError as exc:
-        detail = ""
+    for _ in range(4):
+        body = None
+        headers = {
+            "Authorization": f"token {token}",
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "GitHub-Auto",
+        }
+        if payload is not None:
+            body = json.dumps(payload).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        req = request.Request(url, data=body, headers=headers, method=method)
         try:
-            detail = exc.read().decode("utf-8", errors="replace")
-        except Exception:
-            pass
-        if exc.code == 401:
-            raise ToolError("GitHub token 无效或已过期，请检查 GITHUB_TOKEN") from exc
-        if exc.code == 422 and payload and "name" in payload:
-            return {"conflict": True}
-        raise ToolError(f"GitHub API 请求失败 ({exc.code}): {detail[:300]}") from exc
-    except error.URLError as exc:
-        if isinstance(exc.reason, ssl.SSLError):
-            raise ToolError(
-                f"GitHub API SSL 证书校验失败: {exc.reason}。"
-                "如使用代理/公司网络，可在 config.json 中设置 \"verify_ssl\": false，"
-                "或用 ca_bundle 指定公司 CA 证书路径"
-            ) from exc
-        proxies = describe_proxies()
-        hint = (
-            f"检测到代理（{proxies}），请确认代理软件已启动；"
-            "或在 config.json 中设置 \"proxy\": \"none\" 直连，"
-            "或 \"proxy\": \"http://127.0.0.1:7890\" 指定可用代理"
-            if proxies
-            else "请检查网络/防火墙，确认 api.github.com 可以访问"
-        )
-        raise ToolError(f"无法连接 GitHub API: {exc.reason}。{hint}") from exc
+            with open_url(req, timeout=30) as resp:
+                raw = resp.read().decode("utf-8")
+                return json.loads(raw) if raw else {}
+        except error.HTTPError as exc:
+            if exc.code == 307:
+                location = (exc.headers.get("Location") or "").strip()
+                if location and urlparse(location).netloc == "api.github.com":
+                    log(f"GitHub API 返回 307，自动跟随重定向: {location}", "WARN")
+                    url = location
+                    continue
+            detail = ""
+            try:
+                detail = exc.read().decode("utf-8", errors="replace")
+            except Exception:
+                pass
+            if exc.code == 401:
+                raise ToolError("GitHub token 无效或已过期，请检查 GITHUB_TOKEN") from exc
+            if exc.code == 422 and payload and "name" in payload:
+                return {"conflict": True}
+            raise ToolError(f"GitHub API 请求失败 ({exc.code}): {detail[:300]}") from exc
+        except error.URLError as exc:
+            if isinstance(exc.reason, ssl.SSLError):
+                raise ToolError(
+                    f"GitHub API SSL 证书校验失败: {exc.reason}。"
+                    "如使用代理/公司网络，可在 config.json 中设置 \"verify_ssl\": false，"
+                    "或用 ca_bundle 指定公司 CA 证书路径"
+                ) from exc
+            proxies = describe_proxies()
+            hint = (
+                f"检测到代理（{proxies}），请确认代理软件已启动；"
+                "或在 config.json 中设置 \"proxy\": \"none\" 直连，"
+                "或 \"proxy\": \"http://127.0.0.1:7890\" 指定可用代理"
+                if proxies
+                else "请检查网络/防火墙，确认 api.github.com 可以访问"
+            )
+            raise ToolError(f"无法连接 GitHub API: {exc.reason}。{hint}") from exc
 
 
 def gh_get_login(token: str) -> str:

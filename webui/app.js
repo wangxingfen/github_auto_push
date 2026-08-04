@@ -111,6 +111,7 @@ async function scan() {
     setStatus("请先填写项目根目录", "err");
     return;
   }
+  memSet(MEM_ROOT, root);
   setStatus("正在扫描…");
   try {
     const data = await api("POST", "/api/scan", { root });
@@ -331,11 +332,22 @@ async function doPush() {
 // ---------------- 文件夹选择 ----------------
 
 let pickerPath = "";
+const MEM_DIR = "gha.lastDir";
+const MEM_ROOT = "gha.lastRoot";
 
-async function loadDirs(path) {
+function memGet(key) {
+  try { return localStorage.getItem(key) || ""; } catch (_) { return ""; }
+}
+
+function memSet(key, value) {
+  try { localStorage.setItem(key, value); } catch (_) {}
+}
+
+async function loadDirs(path, fromMemory = false) {
   pickerPath = path;
   try {
     const data = await api("GET", "/api/fs?path=" + encodeURIComponent(path));
+    memSet(MEM_DIR, path);
     $("#picker-path").textContent = data.path || "选择磁盘";
     const list = $("#dir-list");
     list.innerHTML = "";
@@ -357,6 +369,12 @@ async function loadDirs(path) {
       list.appendChild(item);
     });
   } catch (e) {
+    if (fromMemory) {
+      memSet(MEM_DIR, "");
+      toast("上次浏览的目录不存在，已回到磁盘根目录", "info");
+      loadDirs("");
+      return;
+    }
     toast(e.message, "error");
   }
 }
@@ -367,11 +385,14 @@ $("#btn-scan").addEventListener("click", scan);
 $("#root-path").addEventListener("keydown", (e) => { if (e.key === "Enter") scan(); });
 $("#btn-browse").addEventListener("click", () => {
   $("#picker-modal").classList.remove("hidden");
-  loadDirs("");
+  loadDirs(memGet(MEM_DIR) || "", true);
 });
 $("#btn-close-picker").addEventListener("click", () => $("#picker-modal").classList.add("hidden"));
 $("#btn-pick-here").addEventListener("click", () => {
-  if (pickerPath) $("#root-path").value = pickerPath;
+  if (pickerPath) {
+    $("#root-path").value = pickerPath;
+    memSet(MEM_ROOT, pickerPath);
+  }
   $("#picker-modal").classList.add("hidden");
 });
 $("#btn-settings").addEventListener("click", () => $("#settings-modal").classList.remove("hidden"));
@@ -387,5 +408,8 @@ $("#btn-clear-logs").addEventListener("click", () => { $("#log-console").innerHT
 document.querySelectorAll(".tab").forEach((btn) => {
   btn.addEventListener("click", () => switchTab(btn.dataset.tab));
 });
+
+const savedRoot = memGet(MEM_ROOT);
+if (savedRoot) $("#root-path").value = savedRoot;
 
 loadConfig();

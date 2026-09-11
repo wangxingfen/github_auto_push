@@ -15,5 +15,6 @@
   "verify_ssl": true,
   "ca_bundle": "",
   "proxy": "",
-  "license": "MIT"
+  "license": "MIT",
+  "secret_scan": "warn"
 }

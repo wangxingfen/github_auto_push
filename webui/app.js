@@ -45,6 +45,7 @@ function esc(s) {
 function switchTab(name) {
   document.querySelectorAll(".tab").forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
   document.querySelectorAll(".tab-body").forEach((b) => b.classList.toggle("active", b.id === "tab-" + name));
+  if (name === "push") loadBranches();
 }
 
 // ---------------- 配置 ----------------
@@ -154,6 +155,7 @@ async function selectProject(p, ev) {
     p.analysis = a;
     renderAnalysis(a);
     setStatus(`已加载: ${p.name}`, "ok");
+    loadBranches();
   } catch (e) {
     setStatus("分析失败: " + e.message, "err");
   }
@@ -308,21 +310,103 @@ async function doSave() {
 
 // ---------------- 推送 ----------------
 
+const branchCache = new Map();
+
+function branchRank(name) {
+  if (name === "main") return 0;
+  if (name === "master") return 1;
+  return 2;
+}
+
+async function loadBranches(force = false) {
+  if (!state.current) return;
+  const path = state.current.path;
+  if (!force && branchCache.has(path)) {
+    renderBranchOptions(branchCache.get(path));
+    return;
+  }
+  let info = {
+    exists: false,
+    local: "",
+    local_branches: [],
+    remote_branches: [],
+    remote_default: "",
+    remote_url: "",
+  };
+  try {
+    info = await api("GET", "/api/branches?path=" + encodeURIComponent(path));
+  } catch (e) {
+    // 分支列表获取失败时仍可使用默认选项（main/master/自定义）
+  }
+  branchCache.set(path, info);
+  renderBranchOptions(info);
+}
+
+function renderBranchOptions(info) {
+  const sel = $("#push-branch");
+  const names = [
+    ...new Set([
+      ...(info.local_branches || []),
+      ...(info.remote_branches || []),
+      "main",
+      "master",
+    ]),
+  ];
+  names.sort((a, b) => branchRank(a) - branchRank(b) || a.localeCompare(b));
+  sel.innerHTML =
+    names.map((n) => `<option value="${esc(n)}">${esc(n)}</option>`).join("") +
+    '<option value="__new__">自定义新分支…</option>';
+
+  const preferred = info.local || info.remote_default || (names.includes("main") ? "main" : names[0]);
+  sel.value = names.includes(preferred) ? preferred : "main";
+
+  const parts = [];
+  if (info.local) parts.push(`当前本地分支: ${info.local}`);
+  if (info.remote_default) parts.push(`远端默认分支: ${info.remote_default}`);
+  if (info.remote_branches && info.remote_branches.length) {
+    parts.push(`远端分支: ${info.remote_branches.join(", ")}`);
+  }
+  if (info.remote_url) parts.push(`远端: ${info.remote_url}`);
+  if (!parts.length) parts.push("尚未检测到 git 分支信息（推送时将自动创建所选分支）");
+  $("#push-branch-info").textContent = parts.join("  |  ");
+  toggleCustomBranch();
+}
+
+function toggleCustomBranch() {
+  const isCustom = $("#push-branch").value === "__new__";
+  const input = $("#push-branch-custom");
+  input.style.display = isCustom ? "" : "none";
+  if (!isCustom) input.value = "";
+}
+
 async function doPush() {
   if (!state.current) { toast("请先选择项目", "error"); return; }
+  let branch = $("#push-branch").value;
+  if (branch === "__new__") {
+    branch = $("#push-branch-custom").value.trim();
+    if (!branch) { toast("请填写自定义分支名", "error"); return; }
+    if (/[ ~^:?*[\\]/.test(branch) || branch.includes("..") || branch.startsWith("-")) {
+      toast("分支名包含不合法字符", "error");
+      return;
+    }
+  }
   const body = {
     path: state.current.path,
     private: $("#push-private").checked,
     commit_message: $("#push-message").value.trim(),
+    branch,
   };
-  setStatus("正在推送…");
+  setStatus(`正在推送到分支 ${branch}…`);
   switchTab("logs");
   try {
     const { job_id } = await api("POST", "/api/push", body);
     const result = await runJob(job_id);
-    $("#push-status").textContent = result.status === "pushed" ? "✅ 已推送到 GitHub" : JSON.stringify(result);
+    const pushedBranch = result.branch || branch;
+    $("#push-status").textContent = result.status === "pushed" ? `✅ 已推送到 GitHub（分支: ${pushedBranch}）` : JSON.stringify(result);
     toast("推送完成 🎉", "ok");
-    setStatus("已推送", "ok");
+    setStatus(`已推送（${pushedBranch}）`, "ok");
+    branchCache.delete(state.current.path);
+    loadBranches();
   } catch (e) {
     toast("推送失败: " + e.message, "error");
     setStatus("推送失败", "err");
@@ -403,6 +487,7 @@ $("#btn-deps").addEventListener("click", doDeps);
 $("#btn-save").addEventListener("click", doSave);
 $("#btn-preview").addEventListener("click", refreshPreview);
 $("#btn-push").addEventListener("click", doPush);
+$("#push-branch").addEventListener("change", toggleCustomBranch);
 $("#btn-clear-logs").addEventListener("click", () => { $("#log-console").innerHTML = ""; });
 
 document.querySelectorAll(".tab").forEach((btn) => {

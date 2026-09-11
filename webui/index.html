@@ -107,14 +107,23 @@
       <div id="tab-push" class="tab-body">
         <div class="card">
           <div class="card-title">推送到 GitHub</div>
-          <p class="muted">项目没有远程仓库时会自动创建 GitHub 仓库（需要 GITHUB_TOKEN）；已有远程则直接提交推送。</p>
+          <p class="muted">项目没有远程仓库时会自动创建 GitHub 仓库（需要 GITHUB_TOKEN）；已有远程则直接提交推送。可自定义目标分支，远端已存在 main/master 时也能正常选择并推送。</p>
           <div class="row wrap">
+            <label>目标分支
+              <select id="push-branch">
+                <option value="main">main（默认）</option>
+                <option value="master">master</option>
+                <option value="__new__">自定义新分支…</option>
+              </select>
+            </label>
+            <input id="push-branch-custom" class="input-wide" placeholder="输入新分支名，如 feature/v1.0 或 dev" spellcheck="false" style="display:none">
             <label class="check"><input type="checkbox" id="push-private"> 创建私有仓库</label>
             <label>提交信息
               <input id="push-message" class="input-wide" placeholder="docs: generate README via GitHub Auto" spellcheck="false">
             </label>
             <button id="btn-push" class="primary big">🚀 推送</button>
           </div>
+          <div id="push-branch-info" class="muted"></div>
           <div id="push-status" class="muted"></div>
         </div>
       </div>

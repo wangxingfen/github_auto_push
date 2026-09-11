@@ -7,8 +7,9 @@
 - **自动分析项目**：识别编程语言、代码规模、包管理元数据（package.json / pyproject.toml / requirements.txt / Cargo.toml / go.mod 等）、许可证、CI 工作流、git 提交记录
 - **AI 生成精美 README**：调用 OpenAI 兼容接口（`/chat/completions`），输出带徽章、快速开始、项目结构等完整结构的 README；未配置 API Key 时自动回退到内置模板
 - **可视化 Web 界面**：`web` 命令启动本地网页版，文件夹浏览器、项目分析面板、README 编辑/实时预览、日志流、一键推送，全中文界面
-- **直接推送 GitHub**：项目没有远程仓库时自动通过 GitHub REST API 建仓并添加 `origin`，然后提交并推送；已有远程时直接推送
+- **直接推送 GitHub**：项目没有远程仓库时自动通过 GitHub REST API 建仓并添加 `origin`，然后提交并推送；已有远程时直接推送；支持选择目标分支（main / master / 远端已有分支 / 自定义新分支），远端已存在 main 分支时也能正常选择并推送
 - **安全**：GitHub token 通过环境变量或 `config.json` 提供；推送时通过 git 环境变量注入认证头，token 不会出现在命令行参数中
+- **密钥提醒**：提交前扫暂存区、推送前扫跟踪文件，发现疑似密钥（OpenAI / GitHub / AWS / 私钥等）列在日志里。默认只提示不拦截，要拦截把 `secret_scan` 设为 `"block"`
 - **批量处理**：`run` 命令扫描根目录下的所有子项目，逐个生成并推送，最后输出汇总
 - **纯标准库**：只依赖 Python 3.10+ 和 git，无第三方包
 
@@ -42,6 +43,7 @@ $env:GITHUB_TOKEN = "ghp_..."
 - `readme_lang` 支持 `auto`（根据已有 README 语言判断）、`zh`、`en`
 - `verify_ssl`（默认 `true`）：代理/公司网络下如遇 SSL 证书校验失败，可设为 `false` 跳过校验，或用 `ca_bundle` 指向公司 CA 证书文件；环境变量 `SSL_VERIFY=false` 同样生效
 - `proxy`（默认空）：留空=跟随系统代理；`"none"`=强制直连；也可指定代理地址如 `"http://127.0.0.1:7890"`；环境变量 `PROXY` 同样生效
+- `secret_scan`（默认 `"warn"`）：提交/推送前的密钥提醒，三档 `warn` / `block` / `off`，详见下方「密钥提醒」章节
 
 ### 2. 分析单个项目并生成 README
 
@@ -66,10 +68,10 @@ python github_auto.py web
 命令会自动打开浏览器访问 `http://127.0.0.1:8765`，界面支持：
 
 - 文件夹浏览器：点击「浏览…」逐级选择目录，或直接粘贴路径后「扫描项目」
-- 项目列表：自动发现根目录下所有项目（`.git` / 清单文件 / 源码文件）
+- 项目列表：自动发现根目录下所有子文件夹（一律视为项目，不要求含代码）
 - 分析面板：语言分布、代码规模、许可证、CI 工作流、元数据、目录树、git 信息
 - README 工作区：一键生成（AI 或模板）、左右分栏实时预览、直接编辑保存
-- 推送面板：选择公开/私有仓库、自定义提交信息、一键推送，日志实时滚动
+- 推送面板：选择公开/私有仓库、选择目标分支（main / master / 远端已有分支 / 自定义新分支）、自定义提交信息、一键推送，日志实时滚动
 - 右上角徽章实时显示 LLM / GitHub token 是否已配置；设置里可切换模型、API 地址、README 语言（本次会话生效）
 
 其他参数：`--port 9000` 换端口，`--host 0.0.0.0` 允许局域网访问，`--no-browser` 不自动打开浏览器。
@@ -80,7 +82,7 @@ python github_auto.py web
 python github_auto.py run D:\projects --private
 ```
 
-扫描 `D:\projects` 下的每个子项目（需要包含 `.git`、清单文件或至少 2 个源码文件），为每个项目生成 README 并推送 GitHub。加上 `--dry-run` 可先预览全部操作。
+扫描 `D:\projects` 下的每个子文件夹（一律视为项目，不要求含 `.git`、清单文件或源码文件；`node_modules`、`__pycache__` 等缓存目录和隐藏目录除外），为每个项目生成 README 并推送 GitHub。加上 `--dry-run` 可先预览全部操作，`--branch dev` 可指定推送目标分支。
 
 ### 5. 只推送已有项目
 
@@ -89,6 +91,13 @@ python github_auto.py push D:\projects\my-app
 ```
 
 如果项目已有远程仓库就直接提交推送；没有远程仓库且配置了 `GITHUB_TOKEN` 时自动建仓（仓库名取自文件夹名，重名会自动追加 `-2`、`-3`）。
+
+常用参数：
+
+- `--private`：创建私有仓库
+- `--branch <分支名>`：推送目标分支，默认 `main`；例如 `--branch master` 或 `--branch feature/v1`
+- `--dry-run`：只打印将要执行的操作，不实际推送
+- `--no-secret-scan`：本次跳过密钥扫描（确认是误报时用）
 
 ### 6. 一键诊断网络/代理
 
@@ -129,7 +138,7 @@ Web 界面右上角「设置」里可以修改并**保存到 config.json** 的�
 ```text
 指定文件夹
     │
-    ├─ 发现子项目（.git / 清单文件 / 源码文件）
+    ├─ 发现子文件夹（全部视为项目）
     │
     ├─ 分析：语言、行数、元数据、许可证、git 信息、目录树
     │
@@ -139,6 +148,74 @@ Web 界面右上角「设置」里可以修改并**保存到 config.json** 的�
 ```
 
 可视化界面复用同一套分析/生成/推送引擎，只是多了网页操作层。
+
+## 密钥提醒
+
+提交和推送前自动扫描疑似密钥。**默认只提示，不拦截** —— 发现会在日志里列出来，提交/推送照常继续。
+
+```text
+提交前  →  扫暂存区（git diff --cached）—— 只看将要提交的内容
+推送前  →  扫跟踪文件（git ls-files）—— 看工作区里还留着什么
+```
+
+扫的是「将要提交/推送的东西」，不是整个工作区 —— 你还没 `git add` 的本地改动不会影响判断。
+
+### 三档
+
+`config.json` 里的 `secret_scan`：
+
+| 值 | 行为 |
+| --- | --- |
+| `"warn"`（默认） | 扫，发现只写日志，**绝不阻断** |
+| `"block"` | 扫，发现即中止提交/推送，并撤回 `git add` |
+| `false` / `"off"` | 不扫 |
+
+> 旧配置里写 `true` 的，升级后等同 `"warn"`（以前是拦截）。要拦必须显式写 `"block"`。
+
+为什么默认是 warn：判据再准也架不住项目形态千奇百怪，一个会挡住正常推送的闸门，结局就是被关掉或被绕过 —— 那等于没有。**先让人看见，再决定拦不拦。**
+
+### 判据
+
+1. 有固定前缀的密钥形态：`sk-`、`ghp_`、`AKIA`、`tvly-`、`hf_`、`glpat-`、`-----BEGIN PRIVATE KEY-----`（需独占一行）等
+2. 字段名含密钥词根（`key` / `token` / `secret` / `password` / `cred`），且值像密钥（长度 + 字符混合 + 熵值）
+
+这些不报：
+
+- 数量/上限类：`max_tokens`、`token_limit`、`state_key`
+- 哈希/ID 类：`sha256`、`commit_id`、`uuid`
+- URL / 路径常量：`TOKEN_REMOTE_URL = '/api/v1/...'`、`PASSWORD_LOGIN_PREFIX = '/api/v1/...'`
+- 普通业务字段：`serviceCode`、`api`、`appName`（不含密钥词根）
+- 代码里当字符串处理的 PEM 头：`for tag in ('-----BEGIN RSA PRIVATE KEY-----', …)`
+
+误报多了闸门就会被绕过，所以判据是刻意调紧的。
+
+### 确认是误报怎么办？
+
+- 单行豁免：在该行加注释 `allowlist secret`（或 `nosecret`）
+- 全局豁免：项目根目录建 `.gitguard-allow`，每行一条正则
+- 本次跳过：`push <路径> --no-secret-scan`
+- 长期关闭：`config.json` 里设 `"secret_scan": false`
+
+### 大仓库
+
+单次扫描有预算（6000 个文件 / 48MB），到顶就停并在报告里说明。大仓库逐个读文件会拖到几分钟，闸门挂死比漏报更糟。
+
+### 单独跑
+
+扫描器本体是 `gitguard.py`：
+
+```powershell
+python gitguard.py --staged     # 暂存区
+python gitguard.py --tree       # 跟踪文件
+python gitguard.py --history    # 全部提交历史
+python gitguard.py --files <路径…>
+```
+
+改判据前后先跑回归用例（18 条，每条都来自真实项目里踩过的坑）：
+
+```powershell
+python rules_regress.py
+```
 
 ## 常见问题
 

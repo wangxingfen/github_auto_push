@@ -132,124 +132,6 @@ class ToolError(Exception):
 
 
 # --------------------------------------------------------------------------
-# 密钥闸门 —— 提交前扫暂存区、推送前扫跟踪文件，命中按档位处理
-# --------------------------------------------------------------------------
-
-# 模块级档位：commit_changes / push_to_remote 的调用点分布在 CLI、批量模式、
-# WebUI 三条路径上，逐个加参数会把签名改得到处都是。
-#
-#   "off"    不扫
-#   "warn"   扫，发现只写日志，绝不阻断（默认）
-#   "block"  扫，发现即中止提交/推送
-#
-# 为什么默认 warn：判据再准也架不住项目形态千奇百怪，一个会挡住正常推送的
-# 闸门，结局就是被关掉（或者被 --no-verify 绕过）—— 那等于没有。
-# 先让人看见，再决定拦不拦。
-_SECRET_SCAN_MODE = "warn"
-_SCAN_TIMEOUT = 180
-
-_OFF_VALUES = ("off", "false", "no", "none", "0")
-_BLOCK_VALUES = ("block", "strict", "abort", "enforce")
-
-
-def apply_secret_scan_config(cfg: dict) -> None:
-    """按 config.secret_scan 设置档位。
-
-    false / "off"            -> off
-    "block" / "strict" …      -> block
-    true / 其它任何值 / 未配置 -> warn（默认）
-
-    注意：true 现在等于 warn，不再是拦截。以前写 true 的配置升级后会
-    从「拦住」变成「只提示」；要拦必须显式写 "block"。
-    """
-    global _SECRET_SCAN_MODE
-    raw = cfg.get("secret_scan", "warn")
-    if raw is False:
-        _SECRET_SCAN_MODE = "off"
-        return
-    if isinstance(raw, str):
-        low = raw.strip().lower()
-        if low in _OFF_VALUES:
-            _SECRET_SCAN_MODE = "off"
-            return
-        if low in _BLOCK_VALUES:
-            _SECRET_SCAN_MODE = "block"
-            return
-    _SECRET_SCAN_MODE = "warn"
-
-
-def _scanner_path() -> Path:
-    return Path(__file__).resolve().parent / "gitguard.py"
-
-
-def run_secret_scan(root: Path, mode: str = "--staged") -> tuple[bool, str]:
-    """跑一次密钥扫描，返回 (是否通过, 报告文本)。
-
-    mode: --staged 只扫暂存内容（提交前用，不误伤未 add 的本地改动）；
-          --tree   扫 git 跟踪文件的工作区内容（推送前用）。
-
-    扫描器缺失或自身异常一律放行 —— 扫描器装歪了不该把正常推送堵死；
-    只有「确实命中」（退出码 1）才拦。
-    """
-    script = _scanner_path()
-    if not script.exists():
-        return True, f"未找到 {script.name}，跳过密钥扫描"
-    python = "python" if getattr(sys, "frozen", False) else (sys.executable or "python")
-    env = dict(os.environ)
-    env["GITGUARD_ROOT"] = str(root)
-    env["PYTHONIOENCODING"] = "utf-8"
-    try:
-        proc = subprocess.run(
-            [python, str(script), mode],
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-            env=env, timeout=_SCAN_TIMEOUT, check=False,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        return True, f"密钥扫描未能执行（{exc}），已跳过"
-    out = (proc.stdout or "").strip()
-    err = (proc.stderr or "").strip()
-    if proc.returncode == 0:
-        return True, out
-    if proc.returncode == 1:
-        return False, out or err
-    return True, f"密钥扫描器异常退出（code={proc.returncode}）：{err or out}"
-
-
-def _secret_scan_gate(root: Path, mode: str, stage: str) -> None:
-    """执行扫描。
-
-    warn 档（默认）：把发现写进日志，**不阻断** —— 提交/推送照常继续。
-    block 档：发现即抛 ToolError 中止。
-    off 档：直接返回，连扫描器都不启动。
-    """
-    if _SECRET_SCAN_MODE == "off":
-        return
-    ok, report = run_secret_scan(root, mode)
-    if ok:
-        log(f"密钥扫描通过（{stage}）")
-        return
-    warning = _SECRET_SCAN_MODE != "block"
-    level = "WARN" if warning else "ERR"
-    log(f"密钥扫描发现疑似密钥（{stage}）：", level)
-    for line in report.splitlines():
-        log("   " + line, level)
-    if warning:
-        log(
-            f"warn 档：仅提示，{stage}继续。"
-            "误报可在该行加 `allowlist secret` 或写进 .gitguard-allow；"
-            '要改成拦截，把 config.json 的 secret_scan 设为 "block"。',
-            "WARN",
-        )
-        return
-    raise ToolError(
-        f"{stage}已中止：发现疑似密钥。\n"
-        "请把密钥移出仓库（改用 config.json 或环境变量），"
-        "或在该行加 `allowlist secret` 注释；"
-        "确属误报可写进 .gitguard-allow（正则，每行一条）。"
-    )
-
-
-# --------------------------------------------------------------------------
 # 配置
 # --------------------------------------------------------------------------
 
@@ -271,7 +153,6 @@ DEFAULT_CONFIG = {
     "ca_bundle": "",
     "proxy": "",
     "license": "MIT",
-    "secret_scan": "warn",
 }
 
 _CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
@@ -844,16 +725,6 @@ def commit_changes(root: Path, message: str, dry_run: bool) -> bool:
     if dry_run:
         return True
     run_git(root, ["add", "-A"])
-    if _SECRET_SCAN_MODE != "off":
-        # 扫暂存内容而非工作区：只盯「即将进入历史」的东西，
-        # 用户还没 add 的本地改动不该影响判断。
-        try:
-            _secret_scan_gate(root, "--staged", "提交")
-        except ToolError:
-            # 只有 block 档会走到这里：撤回暂存，
-            # 别让密钥被后续任何一次 commit 顺带带进历史
-            run_git(root, ["reset"], check=False)
-            raise
     run_git(root, ["commit", "-m", message])
     log("已提交变更", "OK")
     return True
@@ -972,8 +843,6 @@ def push_to_remote(
     log(f"将执行: git push -u origin {branch}")
     if dry_run:
         return
-    # 推送前再看一道：提交闸门只管新提交，这一道看的是「工作区里还留着密钥」
-    _secret_scan_gate(root, "--tree", "推送")
     proxy_info = _git_proxy_info(root)
     if proxy_info and not proxy:
         log(f"检测到 git 代理配置: {proxy_info}（连接失败时会自动尝试直连）")
@@ -2856,11 +2725,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", help="指定配置文件路径（默认读取脚本目录或当前目录下的 config.json）")
     parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
 
-    # 密钥扫描开关：挂在需要推送的子命令上（用法 `push <path> --no-secret-scan`）
-    scan_opt = argparse.ArgumentParser(add_help=False)
-    scan_opt.add_argument("--no-secret-scan", action="store_true",
-                          help="本次关闭提交/推送前的密钥扫描（默认开启）")
-
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_analyze = sub.add_parser("analyze", help="分析单个项目并生成 README")
@@ -2871,7 +2735,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_analyze.add_argument("--no-ai", action="store_true", help="跳过 AI，使用内置模板")
     p_analyze.add_argument("--dry-run", action="store_true", help="只打印将要执行的操作，不写文件、不调用 API")
 
-    p_run = sub.add_parser("run", help="批量处理根目录下的所有项目（生成 README 并推送）", parents=[scan_opt])
+    p_run = sub.add_parser("run", help="批量处理根目录下的所有项目（生成 README 并推送）")
     p_run.add_argument("root", help="包含多个项目的根目录")
     p_run.add_argument("--lang", choices=["auto", "zh", "en"], default=None, help="README 语言")
     p_run.add_argument("--force", action="store_true", help="覆盖已有 README")
@@ -2882,13 +2746,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--dry-run", action="store_true", help="只打印将要执行的操作，不写文件、不调用 API、不推送")
     p_run.add_argument("--branch", default="main", help="推送目标分支（默认 main，如 master 或自定义新分支）")
 
-    p_push = sub.add_parser("push", help="将项目提交并推送到 GitHub（无远程时自动创建仓库）", parents=[scan_opt])
+    p_push = sub.add_parser("push", help="将项目提交并推送到 GitHub（无远程时自动创建仓库）")
     p_push.add_argument("path", help="项目路径")
     p_push.add_argument("--private", action="store_true", help="创建私有仓库")
     p_push.add_argument("--dry-run", action="store_true", help="只打印将要执行的操作，不实际推送")
     p_push.add_argument("--branch", default="main", help="推送目标分支（默认 main，如 master 或自定义新分支）")
 
-    p_web = sub.add_parser("web", help="启动可视化 Web 界面（推荐）", parents=[scan_opt])
+    p_web = sub.add_parser("web", help="启动可视化 Web 界面（推荐）")
     p_web.add_argument("--host", default="127.0.0.1", help="监听地址（默认 127.0.0.1）")
     p_web.add_argument("--port", type=int, default=8765, help="端口（默认 8765）")
     p_web.add_argument("--no-browser", action="store_true", help="不自动打开浏览器")
@@ -2906,9 +2770,6 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = build_parser().parse_args()
     cfg = load_config(args.config)
-    apply_secret_scan_config(cfg)
-    if getattr(args, "no_secret_scan", False):
-        apply_secret_scan_config({"secret_scan": False})
     configure_ssl(cfg)
 
     if args.command == "analyze":
